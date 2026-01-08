@@ -1,5 +1,5 @@
-# Final Project Goal (by End of April)
-By the end of April, this project will produce a reinforcement learning agent that can manage blood glucose levels in a simulated diabetes patient. The simulation will be grounded using empirical trends extracted from real-life diabetes data, and the learned policy will be evaluated using clinically meaningful metrics such as time-in-range and safety violations. The project will be fully documented and ready for presentation and written reporting beginning in May.
+# Final Project Goal
+By the end of April, this project will produce a reinforcement learning agent that can manage blood glucose levels in a simulated diabetes patient. The simulation will be grounded using empirical trends extracted from real-life diabetes data, and the learned policy will be evaluated using clinically meaningful metrics such as time-in-range and safety violations.
 
 # BI-WEEKLY PHASE 1: PROJECT SETUP AND DATA SELECTION
 Define project scope and research goal
@@ -45,4 +45,3 @@ Perform optional distribution matching with real-life data
 Finalize experiments and results
 Select final plots and metrics
 Clean and document codebase
-Prepare project for presentations and write-ups
