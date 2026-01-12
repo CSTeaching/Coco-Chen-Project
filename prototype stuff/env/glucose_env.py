@@ -83,7 +83,7 @@ class GlucoseEnv(gym.Env):
             self.metabolism_std = 0.05  # stochasticity in metabolism
         elif self.patient_type == 'type2_variable':
             # Variable type 2 diabetic: less predictable response
-            self.insulin_sensitivity = 12.0  # lower sensitivity (less responsive)
+            self.insulin_sensitiv'ity = 12.0  # lower sensitivity (less responsive)
             self.basal_glucose_production = 2.0
             self.glucose_decay = 0.97
             self.meal_carbs_std = 60.0  # more variable meals
