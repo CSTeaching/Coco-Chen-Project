@@ -1,0 +1,4 @@
+metric,mean_across_seeds,std_across_seeds,units
+time_in_range_percent,52.845833333333324,3.90069017911661,percent
+hypo_events,2.84,0.23748684174075838,events
+total_insulin_units,827.03286199262,213.8816155932996,units

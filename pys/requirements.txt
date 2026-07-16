@@ -1,0 +1,8 @@
+numpy
+gymnasium
+torch
+matplotlib
+pandas
+scipy
+# Note: For CPU-only install on machines without CUDA, use:
+# pip install --index-url https://download.pytorch.org/whl/cpu torch

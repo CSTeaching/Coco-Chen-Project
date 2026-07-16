@@ -24,8 +24,8 @@ import numpy as np
 # Add parent directory to path so we can import from root
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from glucose_env import GlucoseEnv
-from simulator_params import load_params, get_glucose_params
+from pys.glucose_env import GlucoseEnv
+from pys.simulator_params import load_params, get_glucose_params
 
 
 # Standard time-in-range threshold for T1D (80–180 mg/dL)

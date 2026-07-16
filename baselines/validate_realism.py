@@ -24,8 +24,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from glucose_env import GlucoseEnv
-from simulator_params import load_params, get_basal_params, get_bolus_params, get_meal_params
+from pys.glucose_env import GlucoseEnv
+from pys.simulator_params import load_params, get_basal_params, get_bolus_params, get_meal_params
 from baselines.eval_baselines import (
     BaselinePolicy,
     NoInsulinPolicy,

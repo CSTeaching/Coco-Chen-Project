@@ -8,7 +8,7 @@ Verifies:
 """
 
 import numpy as np
-from glucose_env import GlucoseEnv
+from pys.glucose_env import GlucoseEnv
 
 def test_meal_absorption():
     """Test that meals are absorbed over 24 steps, not instantly."""

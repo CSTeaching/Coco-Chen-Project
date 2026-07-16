@@ -18,6 +18,12 @@ Metrics tracked per step in info dict:
   - hypo_event: 1 if we just ENTERED hypo zone, else 0
   - severe_hyper_step: 1 if glucose > 292 mg/dL this step, else 0
   - severe_hyper_event: 1 if we just ENTERED severe hyper zone, else 0
+
+SIMULATOR FROZEN (v2.1):
+  - Frozen on 2026-05-07 for final paper experiments
+  - Do NOT modify dynamics, parameters, or reward without explicit decision
+  - All multi-seed training and results use this fixed version
+  - Baseline behaviors validated in artifacts/realism_validation_summary.csv
 """
 
 from __future__ import annotations
@@ -30,7 +36,7 @@ except ImportError:
     import gym
     from gym import spaces
 
-from simulator_params import (
+from pys.simulator_params import (
     load_params,
     get_glucose_params,
     get_meal_params,
@@ -50,11 +56,11 @@ class GlucoseEnv(gym.Env):
     TIR_HIGH = 180.0
 
     # Zone reward magnitudes.
-    REWARD_IN_RANGE = 1.0
-    PENALTY_LOW = -5.0
-    PENALTY_HYPO = -20.0
-    PENALTY_HIGH = -2.0
-    PENALTY_SEVERE_HYPER = -10.0
+    REWARD_IN_RANGE = 2.0
+    PENALTY_LOW = -4.0
+    PENALTY_HYPO = -25.0
+    PENALTY_HIGH = -1.0
+    PENALTY_SEVERE_HYPER = -15.0
 
     # Temporal dynamics: absorption horizons (in steps of 5 minutes)
     MEAL_ABSORPTION_STEPS = 24  # 2 hours: glucose rise spreads over this many steps
@@ -65,7 +71,8 @@ class GlucoseEnv(gym.Env):
         params_json_path: str | None = None,
         random_seed: int | None = None,
         stochastic_meals: bool = True,
-        insulin_penalty_coeff: float = 0.1,
+        insulin_penalty_coeff: float = 0.25,
+        bolus_cooldown_steps: int | None = None,
         verbose: bool = False,
     ):
         super().__init__()
@@ -77,6 +84,14 @@ class GlucoseEnv(gym.Env):
         self.params = load_params(params_json_path)
         self._extract_params()
 
+        # Block back-to-back boluses while the prior dose is still absorbing.
+        # This is derived from the 3-hour insulin absorption horizon rather than an arbitrary rule.
+        self.bolus_cooldown_steps = (
+            bolus_cooldown_steps
+            if bolus_cooldown_steps is not None
+            else max(1, self.INSULIN_ABSORPTION_STEPS // 6)
+        )
+
         # RNG
         self.rng = np.random.RandomState(random_seed)
 
@@ -85,7 +100,8 @@ class GlucoseEnv(gym.Env):
         self.glucose_prev = None
         self.step_count = 0
         self.last_bolus_dose = 0.0
-        self.steps_since_last_bolus = 0
+        # Start outside the cooldown window so the agent can dose at t=0 if needed.
+        self.steps_since_last_bolus = self.bolus_cooldown_steps
         self.was_in_hypo = False
         self.was_in_severe_hyper = False
 
@@ -170,7 +186,7 @@ class GlucoseEnv(gym.Env):
         self.glucose_prev = self.glucose
         self.step_count = 0
         self.last_bolus_dose = 0.0
-        self.steps_since_last_bolus = 0
+        self.steps_since_last_bolus = self.bolus_cooldown_steps
         self.was_in_hypo = False
         self.was_in_severe_hyper = False
 
@@ -245,7 +261,16 @@ class GlucoseEnv(gym.Env):
         was_in_hypo = self.glucose < self.glucose_hypo
         was_in_severe_hyper = self.glucose > self.glucose_severe_hyper
 
-        bolus_dose = self.bolus_actions[action]
+        requested_bolus_dose = self.bolus_actions[action]
+        cooldown_active = self.steps_since_last_bolus < self.bolus_cooldown_steps
+        bolus_dose = requested_bolus_dose
+        cooldown_blocked = False
+
+        # If the previous bolus is still absorbing, suppress the new one.
+        if requested_bolus_dose > 0 and cooldown_active:
+            bolus_dose = 0.0
+            cooldown_blocked = True
+
         self.last_bolus_dose = bolus_dose
         if bolus_dose > 0:
             self.steps_since_last_bolus = 0
@@ -306,7 +331,9 @@ class GlucoseEnv(gym.Env):
             zone_reward += self.PENALTY_HIGH
 
         # Configurable insulin penalty for reward sweeps.
-        insulin_penalty = -self.insulin_penalty_coeff * bolus_dose
+        # Penalize requested insulin, not just delivered insulin, so blocked repeated
+        # boluses still teach the agent to stop spamming corrections.
+        insulin_penalty = -self.insulin_penalty_coeff * requested_bolus_dose
         reward = zone_reward + insulin_penalty
 
         # --- Event tracking (transitions) ---
@@ -324,7 +351,9 @@ class GlucoseEnv(gym.Env):
         # Build info dict
         info = {
             "glucose": self.glucose,
+            "bolus_requested": requested_bolus_dose,
             "bolus_delivered": bolus_dose,
+            "cooldown_blocked": int(cooldown_blocked),
             "basal_effect": basal_effect,
             "bolus_effect": bolus_effect,
             "meal_effect": meal_effect,
@@ -340,7 +369,12 @@ class GlucoseEnv(gym.Env):
         }
 
         if self.verbose and (self.step_count % 48 == 0 or terminated):
-            print(f"[step {self.step_count:3d}] glucose={self.glucose:6.1f} | bolus={bolus_dose:4.1f}U | pending_meal={len(self.pending_meal_glucose)} | pending_bolus={len(self.pending_bolus_units)} | reward={reward:+.2f}")
+            print(
+                f"[step {self.step_count:3d}] glucose={self.glucose:6.1f} | "
+                f"bolus={bolus_dose:4.1f}U | blocked={int(cooldown_blocked)} | "
+                f"pending_meal={len(self.pending_meal_glucose)} | "
+                f"pending_bolus={len(self.pending_bolus_units)} | reward={reward:+.2f}"
+            )
 
         obs = self._get_observation()
         return obs, reward, terminated, truncated, info

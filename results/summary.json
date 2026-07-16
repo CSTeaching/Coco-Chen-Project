@@ -1,0 +1,93 @@
+{
+  "sim_params": {
+    "glucose_mean": 162.0,
+    "glucose_std": 60.87,
+    "glucose_median": 155.0,
+    "glucose_min": 40.0,
+    "glucose_max": 400.0,
+    "glucose_delta_std": 6.97,
+    "glucose_delta_p95": 12.0,
+    "tir_pct": 43.5,
+    "hypo_pct": 2.1,
+    "hyper_pct": 54.4,
+    "glucose_iqr_low": 115.0,
+    "glucose_iqr_high": 202.0,
+    "hypo_thresh": 66.0,
+    "hyper_thresh": 292.0,
+    "meal_median_carbs": 36.0,
+    "meal_iqr_low": 20.0,
+    "meal_iqr_high": 52.0,
+    "meal_p95_carbs": 129.5,
+    "meals_per_day": 3.81,
+    "bolus_median": 4.8,
+    "bolus_iqr_low": 2.8,
+    "bolus_iqr_high": 7.6,
+    "bolus_p95": 12.5,
+    "basal_mean": 0.98,
+    "basal_iqr_low": 0.75,
+    "basal_iqr_high": 1.2
+  },
+  "best_train_tir": 13.86111111111111,
+  "evaluation": [
+    {
+      "label": "RL Agent",
+      "tir": 13.1,
+      "tir_std": 5.8,
+      "hypo": 82.0,
+      "hyper": 2.8,
+      "reward": -4706.4,
+      "insulin_day": 16.5
+    },
+    {
+      "label": "No Insulin",
+      "tir": 23.6,
+      "tir_std": 11.4,
+      "hypo": 57.9,
+      "hyper": 15.5,
+      "reward": -3473.4,
+      "insulin_day": 0.0
+    },
+    {
+      "label": "Single Threshold",
+      "tir": 19.0,
+      "tir_std": 10.3,
+      "hypo": 73.4,
+      "hyper": 4.7,
+      "reward": -4210.2,
+      "insulin_day": 5.7
+    },
+    {
+      "label": "Two Threshold",
+      "tir": 19.4,
+      "tir_std": 10.1,
+      "hypo": 72.9,
+      "hyper": 4.9,
+      "reward": -4184.2,
+      "insulin_day": 6.2
+    }
+  ],
+  "multi_seed": [
+    {
+      "seed": 42,
+      "tir": 8.2
+    },
+    {
+      "seed": 123,
+      "tir": 12.2
+    },
+    {
+      "seed": 456,
+      "tir": 11.4
+    },
+    {
+      "seed": 789,
+      "tir": 11.6
+    },
+    {
+      "seed": 999,
+      "tir": 13.1
+    }
+  ],
+  "multi_seed_mean": 11.3,
+  "multi_seed_std": 1.6589153082662178
+}

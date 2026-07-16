@@ -1,0 +1,4 @@
+method,tir_mean,tir_std,insulin_mean,insulin_std,reward_mean,reward_std,hypo_mean,severe_mean,n_seeds
+Baseline: no_insulin,46.2,26.6,0.0,0.0,-683.7,833.9,16.8,22.4,15
+Baseline: single_threshold,50.1,25.2,21.2,17.1,-599.2,815.1,17.5,13.9,15
+Baseline: two_threshold,50.1,25.1,22.7,19.5,-590.9,804.0,17.6,12.8,15

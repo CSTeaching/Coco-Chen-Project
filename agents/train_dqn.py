@@ -30,14 +30,22 @@ import numpy as np
 from collections import deque
 from typing import Tuple, Dict, List
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.nn import functional as F
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    from torch.nn import functional as F
+    TORCH_AVAILABLE = True
+except ImportError:  # pragma: no cover - dependency guard
+    torch = None
+    nn = None
+    optim = None
+    F = None
+    TORCH_AVAILABLE = False
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from glucose_env import GlucoseEnv
+from pys.glucose_env import GlucoseEnv
 
 
 # ============================================================================
@@ -108,10 +116,11 @@ class DQNAgent:
     def __init__(
         self,
         env: GlucoseEnv,
+        history_len: int = 6,
         lr: float = 0.001,
         gamma: float = 0.99,
         epsilon_start: float = 1.0,
-        epsilon_end: float = 0.1,
+        epsilon_end: float = 0.05,
         epsilon_decay_episodes: int = 500,
         replay_buffer_size: int = 10000,
         batch_size: int = 64,
@@ -130,24 +139,43 @@ class DQNAgent:
         self.epsilon_end = epsilon_end
         self.epsilon_decay_episodes = epsilon_decay_episodes
         
-        self.q_net = DQN(input_dim=5, hidden_dim=128, num_actions=5).to(self.device)
-        self.target_net = DQN(input_dim=5, hidden_dim=128, num_actions=5).to(self.device)
+        self.history_len = history_len
+        obs_dim = int(np.prod(self.env.observation_space.shape))
+        input_dim = obs_dim * self.history_len
+        self.q_net = DQN(input_dim=input_dim, hidden_dim=128, num_actions=5).to(self.device)
+        self.target_net = DQN(input_dim=input_dim, hidden_dim=128, num_actions=5).to(self.device)
         self.target_net.load_state_dict(self.q_net.state_dict())
         
         self.optimizer = optim.Adam(self.q_net.parameters(), lr=lr)
         self.replay_buffer = ReplayBuffer(max_size=replay_buffer_size)
         
         self.total_steps = 0
+        # action smoothing to avoid large discrete jumps (improves stability)
+        self.last_action = None
+        self.max_action_jump = 1
     
     def select_action(self, state: np.ndarray, epsilon: float = 0.0) -> int:
+        # Choose an action (epsilon-greedy) then apply optional smoothing
         if self.rng.rand() < epsilon:
-            return self.env.action_space.sample()
+            action = int(self.env.action_space.sample())
         else:
             with torch.no_grad():
                 state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
                 q_values = self.q_net(state_tensor)
-                action = q_values.argmax(dim=1).item()
-            return action
+                action = int(q_values.argmax(dim=1).item())
+
+        # Apply action smoothing: limit the discrete jump size between steps
+        if self.last_action is None:
+            smoothed = action
+        else:
+            delta = action - int(self.last_action)
+            if abs(delta) > self.max_action_jump:
+                smoothed = int(self.last_action) + int(np.sign(delta) * self.max_action_jump)
+            else:
+                smoothed = action
+
+        self.last_action = smoothed
+        return smoothed
     
     def train_step(self) -> float:
         if len(self.replay_buffer) < self.batch_size:
@@ -285,6 +313,118 @@ def compute_episode_metrics(
     return metrics
 
 
+class RewardShapingWrapper:
+    """Wrapper for GlucoseEnv that optionally reshapes the zone reward for training experiments.
+
+    This wrapper does NOT modify the simulator dynamics; it only replaces the per-step
+    zone reward used for agent learning and logging. Original zone reward is preserved
+    in `info['zone_reward_original']`.
+    """
+
+    def __init__(
+        self,
+        env: GlucoseEnv,
+        enable: bool = False,
+        in_range_reward: float | None = None,
+        hypo_penalty: float | None = None,
+        low_penalty: float | None = None,
+        high_penalty: float | None = None,
+        severe_penalty: float | None = None,
+    ):
+        self.env = env
+        self.enable = enable
+        # default to environment constants if not provided
+        self.in_range_reward = (
+            in_range_reward if in_range_reward is not None else float(env.REWARD_IN_RANGE)
+        )
+        self.hypo_penalty = hypo_penalty if hypo_penalty is not None else float(env.PENALTY_HYPO)
+        self.low_penalty = low_penalty if low_penalty is not None else float(env.PENALTY_LOW)
+        self.high_penalty = high_penalty if high_penalty is not None else float(env.PENALTY_HIGH)
+        self.severe_penalty = (
+            severe_penalty if severe_penalty is not None else float(env.PENALTY_SEVERE_HYPER)
+        )
+
+    # Delegate common attributes to the wrapped env
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+    def reset(self, seed: int | None = None, options: dict | None = None):
+        return self.env.reset(seed=seed)
+
+    def step(self, action: int):
+        obs, orig_reward, terminated, truncated, info = self.env.step(action)
+
+        # preserve original values
+        info["zone_reward_original"] = info.get("zone_reward", 0.0)
+        info["insulin_penalty_original"] = info.get("insulin_penalty", 0.0)
+
+        if not self.enable:
+            # nothing to change
+            return obs, orig_reward, terminated, truncated, info
+
+        g = info.get("glucose", float(self.env.glucose))
+        # Recompute shaped zone reward using wrapper configuration
+        if self.env.TIR_LOW <= g <= self.env.TIR_HIGH:
+            zone_shaped = float(self.in_range_reward)
+        elif g < self.env.glucose_hypo:
+            zone_shaped = float(self.hypo_penalty)
+        elif g < self.env.TIR_LOW:
+            zone_shaped = float(self.low_penalty)
+        elif g > self.env.glucose_severe_hyper:
+            zone_shaped = float(self.severe_penalty)
+        else:
+            zone_shaped = float(self.high_penalty)
+
+        # Keep the environment's insulin penalty (configurable via env.param)
+        insulin_pen = info.get("insulin_penalty", 0.0)
+        new_reward = zone_shaped + insulin_pen
+
+        # Expose shaped values for logging
+        info["zone_reward"] = zone_shaped
+        info["insulin_penalty"] = insulin_pen
+        info["reward_shaped"] = new_reward
+
+        return obs, new_reward, terminated, truncated, info
+
+
+class TrainingVariationWrapper:
+    """Wrap env to randomize initial conditions per episode for robustness training.
+
+    This does not modify dynamics; it only perturbs initial state variables to expose
+    the agent to a wider distribution of starting conditions.
+    """
+
+    def __init__(self, env: GlucoseEnv, enable: bool = False, glucose_jitter: float = 10.0):
+        self.env = env
+        self.enable = enable
+        self.glucose_jitter = glucose_jitter
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+    def reset(self, seed: int | None = None, options: dict | None = None):
+        obs, meta = self.env.reset(seed=seed)
+        if not self.enable:
+            return obs, meta
+
+        # Perturb initial glucose within a small jitter around safe median
+        low = self.env.glucose_safe_low
+        high = self.env.glucose_safe_high
+        median = 0.5 * (low + high)
+        perturb = self.env.rng.normal(0, self.glucose_jitter)
+        new_glucose = float(np.clip(median + perturb, self.env.glucose_min, self.env.glucose_max))
+        # set state variables to reflect perturbed start
+        self.env.glucose = new_glucose
+        self.env.glucose_prev = new_glucose
+        # Randomize steps_since_last_bolus to simulate different histories
+        self.env.steps_since_last_bolus = int(self.env.rng.randint(0, max(1, self.env.bolus_cooldown_steps * 3)))
+        obs = self.env._get_observation()
+        return obs, meta
+
+    def step(self, action: int):
+        return self.env.step(action)
+
+
 def evaluate_agent(
     agent: DQNAgent,
     num_episodes: int = 5,
@@ -297,8 +437,14 @@ def evaluate_agent(
     episode_metrics = []
     
     for _ in range(num_episodes):
-        state, _ = agent.env.reset()
-        
+        obs, _ = agent.env.reset()
+        # init history deque with repeated initial obs
+        from collections import deque
+        history = deque(maxlen=agent.history_len)
+        for _ in range(agent.history_len):
+            history.append(obs)
+        state = np.concatenate(list(history))
+
         glucose_vals = []
         actions_vals = []
         hypo_steps = []
@@ -313,7 +459,7 @@ def evaluate_agent(
         done = False
         while not done:
             action = agent.select_action(state, epsilon=0.0)
-            
+
             step_result = agent.env.step(action)
             if len(step_result) == 5:
                 next_state, reward, terminated, truncated, info = step_result
@@ -332,7 +478,10 @@ def evaluate_agent(
             insulin_penalties.append(info["insulin_penalty"])
             total_rewards.append(reward)
             
-            state = next_state
+            # update history and stacked state
+            history.append(next_state)
+            next_stacked = np.concatenate(list(history))
+            state = next_stacked
         
         metrics = compute_episode_metrics(
             glucose_vals, actions_vals,
@@ -421,10 +570,11 @@ def print_sweep_summary(sweep_results: List[Dict]) -> None:
 def train(
     episodes: int = 1000,
     seed: int = 42,
-    lr: float = 0.001,
+    lr: float = 0.0005,
     gamma: float = 0.99,
+    history_len: int = 6,
     replay_size: int = 10000,
-    batch_size: int = 64,
+    batch_size: int = 128,
     target_update_freq: int = 100,
     epsilon_start: float = 1.0,
     epsilon_end: float = 0.1,
@@ -432,23 +582,74 @@ def train(
     eval_freq: int = 50,
     eval_episodes: int = 5,
     output_csv: str = "artifacts/dqn_training.csv",
-    insulin_penalty_coeff: float = 0.1,
+    insulin_penalty_coeff: float = 0.25,
+    min_replay_size: int = 1000,
     early_stop_patience: int | None = None,
     early_stop_min_evals: int = 4,
     safety_hypo_max: float = 3.0,
     safety_severe_max: float = 2.0,
     verbose: bool = False,
     save_models: bool = True,
+    # Reward shaping for training-only experiments (wrapper, does not change dynamics)
+    reward_shaping: bool = False,
+    shape_in_range: float | None = None,
+    shape_hypo: float | None = None,
+    shape_low: float | None = None,
+    shape_high: float | None = None,
+    shape_severe: float | None = None,
+    # Action smoothing (max discrete jump per step)
+    max_action_jump: int = 1,
+    # Training variability augmentation
+    augment_variability: bool = False,
+    variability_glucose_jitter: float = 10.0,
 ):
     """Train DQN agent."""
     
+    # Deterministic seeds for reproducibility
+    import random as _random
+    np.random.seed(seed)
+    _random.seed(seed)
+
     env = GlucoseEnv(
         random_seed=seed,
         insulin_penalty_coeff=insulin_penalty_coeff,
         verbose=False,
     )
+
+    # Optionally wrap env for training-only reward shaping
+    if reward_shaping:
+        env = RewardShapingWrapper(
+            env,
+            enable=True,
+            in_range_reward=shape_in_range,
+            hypo_penalty=shape_hypo,
+            low_penalty=shape_low,
+            high_penalty=shape_high,
+            severe_penalty=shape_severe,
+        )
+
+    if augment_variability:
+        env = TrainingVariationWrapper(env, enable=True, glucose_jitter=variability_glucose_jitter)
     
+    # If torch isn't available, skip DQN training gracefully so the
+    # rest of the experiment pipeline (baselines, summaries) can run.
+    if not TORCH_AVAILABLE:
+        print("PyTorch is not installed. Skipping DQN training.\nInstall torch and re-run to enable DQN experiments.")
+        return
+
+    device_str = "cuda" if torch.cuda.is_available() else "cpu"
+    # extra deterministic settings for torch
+    try:
+        torch.manual_seed(seed)
+        if device_str.startswith("cuda"):
+            torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
+
     agent = DQNAgent(
+        history_len=history_len,
         env=env,
         lr=lr,
         gamma=gamma,
@@ -458,12 +659,15 @@ def train(
         replay_buffer_size=replay_size,
         batch_size=batch_size,
         target_update_freq=target_update_freq,
-        device="cuda" if torch.cuda.is_available() else "cpu",
+        device=device_str,
         seed=seed,
     )
+    # Apply action smoothing setting from train args
+    agent.max_action_jump = max_action_jump
     
     print(f"Training DQN on GlucoseEnv")
     print(f"  Device: {agent.device}")
+    print(f"  Global seed: {seed}")
     print(f"  Insulin penalty coeff: {insulin_penalty_coeff}")
     print(f"  Episodes: {episodes}")
     print(f"  Evaluation every {eval_freq} episodes ({eval_episodes} each)")
@@ -478,8 +682,10 @@ def train(
     csv_rows = []
 
     # Best-checkpoint tracking with safety-aware ranking.
-    # Rank format: (safety_feasible, tir, reward)
-    best_rank = (-1.0, -np.inf, -np.inf)
+    # Best-checkpoint tracking with safety-aware ranking.
+    # Rank format: (safety_feasible, tir, -hypo_events, reward)
+    # prefer models that are safety-feasible, then higher TIR, then fewer hypo events, then reward
+    best_rank = (-1.0, -np.inf, np.inf, -np.inf)
     best_train_episode = -1
     eval_rounds = 0
     no_improve_rounds = 0
@@ -493,7 +699,14 @@ def train(
     stop_training = False
     
     for episode in range(episodes):
-        state, _ = env.reset()
+        # Use episode-specific seed to get reproducible episodes
+        ep_seed = seed + episode
+        obs, _ = env.reset(seed=ep_seed)
+        from collections import deque
+        history = deque(maxlen=history_len)
+        for _ in range(history_len):
+            history.append(obs)
+        state = np.concatenate(list(history))
         
         glucose_vals = []
         actions_vals = []
@@ -518,10 +731,14 @@ def train(
                 done = terminated or truncated
             else:
                 next_state, reward, done, info = step_result
+            # update history with raw next_state then form stacked next state
+            history.append(next_state)
+            next_stacked = np.concatenate(list(history))
+
+            agent.replay_buffer.push(state, action, reward, next_stacked, done)
             
-            agent.replay_buffer.push(state, action, reward, next_state, done)
-            
-            if len(agent.replay_buffer) > batch_size:
+            # require minimum replay buffer before training to avoid noisy early updates
+            if len(agent.replay_buffer) >= batch_size and len(agent.replay_buffer) >= min_replay_size:
                 loss = agent.train_step()
                 losses.append(loss)
                 agent.total_steps += 1
@@ -540,7 +757,7 @@ def train(
             insulin_penalties.append(info["insulin_penalty"])
             total_rewards.append(reward)
             
-            state = next_state
+            state = next_stacked
 
         # Per-episode training metrics log.
         train_metrics = compute_episode_metrics(
@@ -595,7 +812,7 @@ def train(
             safety_feasible = float(
                 (current_hypo <= safety_hypo_max) and (current_severe <= safety_severe_max)
             )
-            current_rank = (safety_feasible, current_tir, current_reward)
+            current_rank = (safety_feasible, current_tir, -float(current_hypo), current_reward)
 
             if current_rank > best_rank:
                 best_rank = current_rank
@@ -663,20 +880,42 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train DQN on GlucoseEnv")
     parser.add_argument("--episodes", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--lr", type=float, default=0.0005)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--replay-size", type=int, default=10000)
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--target-update-freq", type=int, default=100)
     parser.add_argument("--epsilon-start", type=float, default=1.0)
-    parser.add_argument("--epsilon-end", type=float, default=0.1)
-    parser.add_argument("--epsilon-decay", type=int, default=500)
+    parser.add_argument("--epsilon-end", type=float, default=0.05)
+    parser.add_argument("--epsilon-decay", type=int, default=350)
     parser.add_argument("--eval-freq", type=int, default=50)
     parser.add_argument("--eval-episodes", type=int, default=5)
     parser.add_argument("--out", type=str, default="artifacts/dqn_training.csv")
-    parser.add_argument("--insulin-penalty-coeff", type=float, default=0.1)
+    parser.add_argument("--history-len", type=int, default=6,
+                        help="Number of past observations to stack for state input")
+    parser.add_argument("--insulin-penalty-coeff", type=float, default=0.25)
+    parser.add_argument("--reward-shaping", action="store_true",
+                        help="Enable training-only reward shaping via wrapper")
+    parser.add_argument("--shape-in-range", type=float, default=None,
+                        help="Shaped in-range reward (overrides env default when set)")
+    parser.add_argument("--shape-hypo", type=float, default=None,
+                        help="Shaped hypo penalty")
+    parser.add_argument("--shape-low", type=float, default=None,
+                        help="Shaped penalty for below-TIR but above-hypo")
+    parser.add_argument("--shape-high", type=float, default=None,
+                        help="Shaped penalty for above-TIR but below-severe")
+    parser.add_argument("--shape-severe", type=float, default=None,
+                        help="Shaped severe-hyper penalty")
+    parser.add_argument("--max-action-jump", type=int, default=1,
+                        help="Max discrete action index change permitted between steps")
+    parser.add_argument("--augment-variability", action="store_true",
+                        help="Randomize initial glucose/bolus-timing per episode during training")
+    parser.add_argument("--variability-glucose-jitter", type=float, default=10.0,
+                        help="Std dev (mg/dL) for initial glucose perturbation when augmenting variability")
+    parser.add_argument("--min-replay-size", type=int, default=1000,
+                        help="Minimum replay buffer size before training starts")
     parser.add_argument("--sweep-insulin-penalty", action="store_true")
-    parser.add_argument("--sweep-coeffs", type=str, default="0.1,0.3,0.5")
+    parser.add_argument("--sweep-coeffs", type=str, default="0.25,0.35,0.5")
     parser.add_argument("--early-stop-patience", type=int, default=None)
     parser.add_argument("--early-stop-min-evals", type=int, default=4)
     parser.add_argument("--safety-hypo-max", type=float, default=3.0)
@@ -703,6 +942,8 @@ if __name__ == "__main__":
                 seed=args.seed,
                 lr=args.lr,
                 gamma=args.gamma,
+                history_len=args.history_len,
+                min_replay_size=args.min_replay_size,
                 replay_size=args.replay_size,
                 batch_size=args.batch_size,
                 target_update_freq=args.target_update_freq,
@@ -718,6 +959,15 @@ if __name__ == "__main__":
                 safety_hypo_max=args.safety_hypo_max,
                 safety_severe_max=args.safety_severe_max,
                 verbose=args.verbose,
+                reward_shaping=args.reward_shaping,
+                shape_in_range=args.shape_in_range,
+                shape_hypo=args.shape_hypo,
+                shape_low=args.shape_low,
+                shape_high=args.shape_high,
+                shape_severe=args.shape_severe,
+                max_action_jump=args.max_action_jump,
+                augment_variability=args.augment_variability,
+                variability_glucose_jitter=args.variability_glucose_jitter,
             )
             sweep_results.append({"coeff": coeff, "summary": run_summary})
 
@@ -728,6 +978,8 @@ if __name__ == "__main__":
             seed=args.seed,
             lr=args.lr,
             gamma=args.gamma,
+            history_len=args.history_len,
+            min_replay_size=args.min_replay_size,
             replay_size=args.replay_size,
             batch_size=args.batch_size,
             target_update_freq=args.target_update_freq,
@@ -743,4 +995,14 @@ if __name__ == "__main__":
             safety_hypo_max=args.safety_hypo_max,
             safety_severe_max=args.safety_severe_max,
             verbose=args.verbose,
+            reward_shaping=args.reward_shaping,
+            shape_in_range=args.shape_in_range,
+            shape_hypo=args.shape_hypo,
+            shape_low=args.shape_low,
+            shape_high=args.shape_high,
+            shape_severe=args.shape_severe,
+            max_action_jump=args.max_action_jump,
+            augment_variability=args.augment_variability,
+            variability_glucose_jitter=args.variability_glucose_jitter,
         )
+        
